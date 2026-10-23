@@ -46,5 +46,14 @@ WRITABLE="$(find "$SITE_DIR" -perm -o+w 2>/dev/null | tr '\n' ' ')"
 check "Нет файлов ресурса, доступных для записи всем" "" "${WRITABLE% }"
 check "Права закрытого ключа TLS равны 600" "600" "$(sudo stat -c '%a' "$KEY")"
 
+echo "[5] Контейнеризация"
+APP_DIR="${APP_DIR:-$HOME/app}"
+check "Служба docker активна" "active" "$(systemctl is-active docker)"
+check "Контейнер СУБД app-db-1 в состоянии healthy" "healthy" \
+      "$(sudo docker inspect -f '{{.State.Health.Status}}' app-db-1 2>/dev/null || echo "нет контейнера")"
+EXPOSED="$(ss -tln | awk '$4 ~ /:(5000|5432)$/ && $4 !~ /^127\.0\.0\.1:/ {print $4}' | tr '\n' ' ')"
+check "Порты 5000 и 5432 слушаются только на 127.0.0.1" "" "${EXPOSED% }"
+check "Права файла ${APP_DIR}/.env равны 600" "600" "$(stat -c '%a' "${APP_DIR}/.env" 2>/dev/null || echo "нет файла")"
+
 echo "Пройдено: $PASS, не пройдено: $FAIL"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1
