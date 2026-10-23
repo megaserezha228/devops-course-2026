@@ -174,9 +174,84 @@ sudo ufw status verbose
 | `01-clean-install` | 2026-10-23 15:58 | чистая установка, обновления, пользователь student |
 | `02-keys-configured` | 2026-10-23 16:39 | пользователь devops, ключ, `~/.ssh/config` |
 | `03-ssh-hardened` | 2026-10-23 16:54 | sshd на 2222, без паролей и root, проброс 2222→2222 |
+| `04-nginx-https` | 2026-10-23 17:32 | nginx, самоподписанный сертификат, HTTP → HTTPS |
 
 Снимки `03` и далее делаются на выключенной VM (`sudo poweroff` → снимок → запуск):
 «живой» снимок `02` вызвал зависание гостевой ОС (soft lockup), потребовался сброс VM.
+
+## 8. Веб-сервер
+
+- Пакет: `nginx` из репозитория Ubuntu (версия 1.28.3), `sudo apt install -y nginx`.
+  Правила UFW для 80/443 уже есть (раздел 6), профили `Nginx Full` не добавляются.
+- Конфигурация ресурса: `/etc/nginx/sites-available/devops-site`, ссылка
+  `/etc/nginx/sites-enabled/devops-site`; ссылка `sites-enabled/default` удалена
+  (файл `sites-available/default` сохранён).
+- Каталог ресурса: `/var/www/devops-site`, владелец `devops:devops`, каталоги `755`,
+  файлы `644` (права приводит `rsync --chmod=D755,F644`). Содержимое — каталог `site/`
+  репозитория, доставляется `scripts/deploy.sh`.
+- Сертификат: `/etc/ssl/certs/devops.crt`, `root:root`, `644`.
+  Ключ: `/etc/ssl/private/devops.key`, `root:root`, `600`. Срок действия — 365 дней
+  (выпущен 2026-10-23, истекает 2027-10-23). Копия сертификата на хосте: `~/devops.crt`.
+- Журналы: `/var/log/nginx/devops-site.access.log`, `/var/log/nginx/devops-site.error.log`.
+
+Формирование сертификата:
+
+```bash
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/ssl/private/devops.key \
+  -out /etc/ssl/certs/devops.crt \
+  -subj "/CN=devops.local" \
+  -addext "subjectAltName=DNS:devops.local"
+```
+
+`/etc/nginx/sites-available/devops-site`:
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name devops.local;
+
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name devops.local;
+
+    ssl_certificate     /etc/ssl/certs/devops.crt;
+    ssl_certificate_key /etc/ssl/private/devops.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    root /var/www/devops-site;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    error_page 404 /404.html;
+
+    access_log /var/log/nginx/devops-site.access.log;
+    error_log  /var/log/nginx/devops-site.error.log;
+}
+```
+
+Порядок восстановления:
+
+```bash
+# [VM]
+sudo apt update && sudo apt install -y nginx rsync
+sudo mkdir -p /var/www/devops-site && sudo chown -R devops:devops /var/www/devops-site
+# сертификат (команда выше), конфигурация (файл выше)
+sudo ln -s /etc/nginx/sites-available/devops-site /etc/nginx/sites-enabled/
+sudo rm /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+# [Хост]
+scp devops:/etc/ssl/certs/devops.crt ~/devops.crt
+scripts/deploy.sh
+```
 
 ## Проверка
 
