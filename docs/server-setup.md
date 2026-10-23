@@ -175,6 +175,7 @@ sudo ufw status verbose
 | `02-keys-configured` | 2026-10-23 16:39 | пользователь devops, ключ, `~/.ssh/config` |
 | `03-ssh-hardened` | 2026-10-23 16:54 | sshd на 2222, без паролей и root, проброс 2222→2222 |
 | `04-nginx-https` | 2026-10-23 17:32 | nginx, самоподписанный сертификат, HTTP → HTTPS |
+| `05-docker-compose` | 2026-10-23 18:00 | Docker Engine, проект `~/app` (приложение + PostgreSQL) |
 
 Снимки `03` и далее делаются на выключенной VM (`sudo poweroff` → снимок → запуск):
 «живой» снимок `02` вызвал зависание гостевой ОС (soft lockup), потребовался сброс VM.
@@ -251,6 +252,58 @@ sudo nginx -t && sudo systemctl reload nginx
 # [Хост]
 scp devops:/etc/ssl/certs/devops.crt ~/devops.crt
 scripts/deploy.sh
+```
+
+## 9. Контейнеризация
+
+- Docker Engine 29.9.2 (containerd 2.4.2, плагин Compose v5.6.1) из официального
+  репозитория `https://download.docker.com/linux/ubuntu`, ветка `resolute`; пакет
+  `docker.io` не используется. Межсетевой backend Docker — iptables.
+- Группа `docker`: `devops` (у него есть sudo; членство в группе равносильно root).
+- Проект: `/home/devops/app` (копия каталога `app/` репозитория, доставляется rsync),
+  имя проекта Compose — `app`, контейнеры `app-app-1` и `app-db-1`, сеть `app_backend`.
+- Секреты: `/home/devops/app/.env`, владелец `devops`, права `600`, создаётся только
+  на сервере из `.env.example` со случайным паролем; в репозитории — только `.env.example`,
+  `.env` в `.gitignore`.
+- Порты: приложение — `127.0.0.1:5000` (только для Nginx); PostgreSQL 5432 не публикуется,
+  доступен приложению по имени `db` в сети `backend`.
+- Том: `app_db_data` → `/var/lib/postgresql/data` (образ `postgres:16-alpine`).
+- Обратный прокси: в HTTPS-блок `/etc/nginx/sites-available/devops-site` добавлено
+  расположение `/app/` (статический ресурс `/` сохранён):
+
+```nginx
+    location /app/ {
+        proxy_pass http://127.0.0.1:5000/;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+```
+
+Порядок восстановления:
+
+```bash
+# [VM] Docker Engine
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+printf 'Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: %s\nComponents: stable\nSigned-By: /etc/apt/keyrings/docker.asc\n' \
+  "$(. /etc/os-release && echo "$VERSION_CODENAME")" | sudo tee /etc/apt/sources.list.d/docker.sources
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker devops          # затем новая SSH-сессия
+
+# [Хост] доставка проекта
+rsync -avz --delete --exclude=.env app/ devops:app/
+
+# [VM] секреты и запуск
+cd ~/app && cp .env.example .env && chmod 600 .env
+sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+docker compose up -d --build
+# Nginx: добавить location /app/ (фрагмент выше), затем
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
 ## Проверка
